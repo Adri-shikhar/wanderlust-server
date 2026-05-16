@@ -1,7 +1,7 @@
 const express = require('express')
 const dotenv = require('dotenv')
 dotenv.config()
-
+const { jwtVerify, createRemoteJWKSet } = require('jose')
 const cors = require('cors')
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
@@ -19,6 +19,52 @@ const client = new MongoClient(uri, {
   },
 })
 
+function parseClientUrls() {
+  const raw = process.env.CLIENT_URL || 'http://localhost:3000'
+  return raw
+    .split(/[,|]/)
+    .map((s) => s.trim().replace(/\/$/, ''))
+    .filter(Boolean)
+}
+
+const jwksByIssuer = new Map(
+  parseClientUrls().map((origin) => [
+    origin,
+    createRemoteJWKSet(new URL(`${origin}/api/auth/jwks`)),
+  ])
+)
+
+const verifyToken = async (req, res, next) => {
+  const header = req?.headers?.authorization
+  const token = header?.split(' ')[1]
+  if (!token) {
+    return res.status(401).send({ message: 'Unauthorized' })
+  }
+  try {
+    let payload
+    for (const [issuer, jwks] of jwksByIssuer) {
+      try {
+        ;({ payload } = await jwtVerify(token, jwks, {
+          issuer,
+          audience: issuer,
+        }))
+        break
+      } catch {
+        /* try next origin */
+      }
+    }
+    if (!payload) {
+      return res.status(401).send({ message: 'Unauthorized' })
+    }
+    console.log(payload)
+    req.user = payload
+    next()
+  } catch {
+    return res.status(401).send({ message: 'Unauthorized' })
+  }
+}
+
+
 async function run() {
     try {
 
@@ -31,7 +77,9 @@ async function run() {
         const destinations = await cursor.toArray()
         res.send(destinations)
       })
-      app.get('/destinations/:id', async (req, res) => {
+
+
+      app.get('/destinations/:id',verifyToken,async (req, res, next) => {
         const id = req.params.id
         const destination = await destinationCollection.findOne({ _id: new ObjectId(id) })
         res.send(destination)
@@ -72,9 +120,9 @@ async function run() {
         })
         res.send(result)
       })
+      
       // Connect the client to the server	(optional starting in v4.7)
-   
-      // Send a ping to confirm a successful connection
+    
      
       console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } finally {
