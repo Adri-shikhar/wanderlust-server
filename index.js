@@ -1,14 +1,21 @@
 const express = require('express')
 const dotenv = require('dotenv')
 dotenv.config()
-const { jwtVerify, createRemoteJWKSet } = require('jose')
 const cors = require('cors')
-const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb')
+const { verifyToken, parseClientUrls } = require('./middleware/verifyToken')
 
 const app = express()
-app.use(cors())
-app.use(express.json())
 const port = process.env.PORT || 8000
+
+app.use(
+  cors({
+    origin: parseClientUrls(),
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  }),
+)
+app.use(express.json())
 
 const uri = process.env.MONGODB_URI
 const client = new MongoClient(uri, {
@@ -19,123 +26,88 @@ const client = new MongoClient(uri, {
   },
 })
 
-function parseClientUrls() {
-  const raw = process.env.CLIENT_URL || 'http://localhost:3000'
-  return raw
-    .split(/[,|]/)
-    .map((s) => s.trim().replace(/\/$/, ''))
-    .filter(Boolean)
-}
-
-const jwksByIssuer = new Map(
-  parseClientUrls().map((origin) => [
-    origin,
-    createRemoteJWKSet(new URL(`${origin}/api/auth/jwks`)),
-  ])
-)
-
-const verifyToken = async (req, res, next) => {
-  const header = req?.headers?.authorization
-  const token = header?.split(' ')[1]
-  if (!token) {
-    return res.status(401).send({ message: 'Unauthorized' })
-  }
-  try {
-    let payload
-    for (const [issuer, jwks] of jwksByIssuer) {
-      try {
-        ;({ payload } = await jwtVerify(token, jwks, {
-          issuer,
-          audience: issuer,
-        }))
-        break
-      } catch {
-        /* try next origin */
-      }
-    }
-    if (!payload) {
-      return res.status(401).send({ message: 'Unauthorized' })
-    }
-    console.log(payload)
-    req.user = payload
-    next()
-  } catch {
-    return res.status(401).send({ message: 'Unauthorized' })
-  }
-}
-
-
 async function run() {
-    try {
+  try {
+    const db = client.db('Wanderlust')
+    const destinationCollection = db.collection('destinations')
+    const bookingCollection = db.collection('bookings')
 
-      const db = client.db("Wanderlust")
-      const destinationCollection = db.collection("destinations")
-      const bookingCollection = db.collection("bookings")
+    app.get('/destinations', async (req, res) => {
+      const cursor = destinationCollection.find({})
+      const destinations = await cursor.toArray()
+      res.send(destinations)
+    })
 
-      app.get('/destinations', async (req, res) => {
-        const cursor = destinationCollection.find({})
-        const destinations = await cursor.toArray()
-        res.send(destinations)
-      })
+    app.get('/destinations/:id', verifyToken, async (req, res) => {
+      const id = req.params.id
+      let objectId
+      try {
+        objectId = new ObjectId(id)
+      } catch {
+        return res.status(404).send({ message: 'Not found' })
+      }
+      const destination = await destinationCollection.findOne({ _id: objectId })
+      if (!destination) {
+        return res.status(404).send({ message: 'Not found' })
+      }
+      res.send(destination)
+    })
 
+    app.post('/destinations', verifyToken, async (req, res) => {
+      const destination = req.body
+      const result = await destinationCollection.insertOne(destination)
+      res.status(201).send(result)
+    })
 
-      app.get('/destinations/:id',verifyToken,async (req, res, next) => {
-        const id = req.params.id
-        const destination = await destinationCollection.findOne({ _id: new ObjectId(id) })
-        res.send(destination)
+    app.delete('/destinations/:id', verifyToken, async (req, res) => {
+      const id = req.params.id
+      const result = await destinationCollection.deleteOne({
+        _id: new ObjectId(id),
       })
+      res.send(result)
+    })
 
-      app.post('/destinations', async (req, res) => {
-        const destination = req.body
-        const result = await destinationCollection.insertOne(destination)
-        res.send(result)
-      })
+    app.get('/auth/me', verifyToken, (req, res) => {
+      res.send({ user: req.user })
+    })
 
-      app.delete('/destinations/:id', async (req, res) => {
-        const id = req.params.id
-        const result = await destinationCollection.deleteOne({ _id: new ObjectId(id) })
-        res.send(result)
-      })
+    app.get('/bookings', verifyToken, async (req, res) => {
+      const { user_id } = req.query
+      if (!user_id) {
+        return res.status(400).send({ message: 'user_id is required' })
+      }
+      const cursor = bookingCollection.find({ user_id: String(user_id) })
+      const bookings = await cursor.toArray()
+      res.send(bookings)
+    })
 
-      app.get('/bookings', async (req, res) => {
-        const { user_id } = req.query
-        if (!user_id) {
-          return res.status(400).send({ message: 'user_id is required' })
-        }
-        const cursor = bookingCollection.find({ user_id: String(user_id) })
-        const bookings = await cursor.toArray()
-        res.send(bookings)
+    app.post('/bookings', verifyToken, async (req, res) => {
+      const booking = req.body
+      const result = await bookingCollection.insertOne(booking)
+      res.status(201).send(result)
+    })
+
+    app.delete('/bookings/:id', verifyToken, async (req, res) => {
+      const id = req.params.id
+      const { user_id } = req.query
+      const result = await bookingCollection.deleteOne({
+        _id: new ObjectId(id),
+        user_id: String(user_id),
       })
-      app.post('/bookings', async (req, res) => {
-        const booking = req.body
-        const result = await bookingCollection.insertOne(booking)
-        res.send(result)
-      })
-      app.delete('/bookings/:id', async (req, res) => {
-        const id = req.params.id
-        const { user_id } = req.query
-        const result = await bookingCollection.deleteOne({
-          _id: new ObjectId(id),
-          user_id: String(user_id),
-        })
-        res.send(result)
-      })
-      
-      // Connect the client to the server	(optional starting in v4.7)
-    
-     
-      console.log("Pinged your deployment. You successfully connected to MongoDB!");
-    } finally {
-      // Ensures that the client will close when you finish/error
-    
-    }
+      res.send(result)
+    })
+
+    console.log('Pinged your deployment. You successfully connected to MongoDB!')
+  } finally {
+    // client stays open for the lifetime of the process
   }
-  run().catch(console.dir);
+}
+run().catch(console.dir)
 
 app.get('/', (req, res) => {
   res.send('Hello World!')
 })
 
 app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`)
+  console.log(`Server is running on port ${port}`)
 })
